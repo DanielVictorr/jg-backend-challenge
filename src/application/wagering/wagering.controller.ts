@@ -1,19 +1,18 @@
-
 import {
   BadRequestException,
   Body,
   Controller,
+  Get,
   Headers,
+  Param,
+  ParseUUIDPipe,
   Post,
 } from '@nestjs/common';
 
-import {
-  ProcessWagerTransaction,
-} from './process-wager-transaction.js';
+import { ProcessWagerTransaction } from './process-wager-transaction.js';
+import { GetWagerTransaction } from './get-wager-transaction.js';
 
-import type {
-  ProcessWagerTransactionInput,
-} from './process-wager-transaction.js';
+import type { ProcessWagerTransactionInput } from './process-wager-transaction.js';
 
 type ProcessWagerRequestBody = Omit<
   ProcessWagerTransactionInput,
@@ -24,7 +23,16 @@ type ProcessWagerRequestBody = Omit<
 export class WageringController {
   constructor(
     private readonly processWagerTransaction: ProcessWagerTransaction,
+    private readonly getWagerTransaction: GetWagerTransaction,
   ) {}
+
+  @Get('transactions/:transactionId')
+  getById(
+    @Param('transactionId', new ParseUUIDPipe({ version: 'all' }))
+    transactionId: string,
+  ) {
+    return this.getWagerTransaction.executeById(transactionId);
+  }
 
   @Post('transactions')
   async process(

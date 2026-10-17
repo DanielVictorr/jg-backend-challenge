@@ -13,6 +13,8 @@ import { WalletsController } from './application/wallet/wallet.controller.js';
 import { WageringController } from './application/wagering/wagering.controller.js';
 import { GetWallet } from './application/wallet/get-wallet.js';
 import { GetWalletLedger } from './application/wallet/get-wallet-ledger.js';
+import { GetWagerTransaction } from './application/wagering/get-wager-transaction.js';
+import { ProviderWageringTransactionsController } from './application/wagering/provider-wagering-transactions.controller.js';
 
 export const { ObserveModule, ObserveInstrument } = createObserveModule();
 
@@ -54,11 +56,13 @@ export const { ObserveModule, ObserveInstrument } = createObserveModule();
     AppController,
     WalletsController,
     WageringController,
+    ProviderWageringTransactionsController,
   ],
   providers: [
     AppService,
     CreateWallet,
     ProcessWagerTransaction,
+    GetWagerTransaction,
     GetWallet,
     GetWalletLedger,
   ],
