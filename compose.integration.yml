@@ -1,0 +1,39 @@
+﻿services:
+  postgres-integration:
+    image: postgres:16-alpine
+    container_name: jg-postgres-integration
+    environment:
+      POSTGRES_DB: jg_backend_integration
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: integration_only_password
+    ports:
+      - "127.0.0.1:55432:5432"
+    volumes:
+      - postgres_integration_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d jg_backend_integration"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    restart: unless-stopped
+
+  localstack:
+    image: localstack/localstack:4
+    container_name: jg-localstack-integration
+    environment:
+      SERVICES: sqs
+      AWS_DEFAULT_REGION: us-east-1
+      EAGER_SERVICE_LOADING: "1"
+    ports:
+      - "127.0.0.1:4566:4566"
+    volumes:
+      - "./.integration/localstack/init:/etc/localstack/init/ready.d"
+    healthcheck:
+      test: ["CMD", "bash", "-c", "curl -fsS http://localhost:4566/_localstack/health"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+    restart: unless-stopped
+
+volumes:
+  postgres_integration_data:

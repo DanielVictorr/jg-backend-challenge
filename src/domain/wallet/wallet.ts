@@ -55,6 +55,40 @@ export class Wallet {
   }
 
   static rehydrate(state: WalletState): Wallet {
+    if (!state || typeof state !== 'object') {
+      throw new Error('Wallet state is required');
+    }
+
+    if (typeof state.id !== 'string' || !state.id.trim()) {
+      throw new Error('Wallet id is required');
+    }
+
+    if (
+      typeof state.playerId !== 'string' ||
+      !state.playerId.trim()
+    ) {
+      throw new Error('Player id is required');
+    }
+
+    if (!(state.balance instanceof Money)) {
+      throw new Error('Wallet balance is required');
+    }
+
+    if (state.balance.isNegative()) {
+      throw new Error('Wallet balance cannot be negative');
+    }
+
+    if (!Number.isInteger(state.version) || state.version < 1) {
+      throw new Error('Wallet version must be an integer greater than zero');
+    }
+
+    if (
+      !(state.updatedAt instanceof Date) ||
+      Number.isNaN(state.updatedAt.getTime())
+    ) {
+      throw new Error('Invalid wallet updatedAt date');
+    }
+
     return new Wallet(
       state.id,
       state.playerId,

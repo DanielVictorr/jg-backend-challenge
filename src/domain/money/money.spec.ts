@@ -81,4 +81,18 @@ describe('Money', () => {
 
     expect(money.toString()).toBe('25.00 BRL');
   });
+  
+  it('freezes the money instance', () => {
+    const money = Money.from({
+      amount: '10.00',
+      currency: 'BRL',
+    });
+
+    expect(Object.isFrozen(money)).toBe(true);
+
+    expect(() => {
+      Object.assign(money, { currency: 'USD' });
+    }).toThrow();
+  });
+
 });

@@ -124,4 +124,51 @@ describe('Wallet', () => {
     expect(wallet.version).toBe(1);
     expect(wallet.balance.toJSON().amount).toBe('10.00');
   });
+    it('rejects a persisted wallet with an empty id', () => {
+    expect(() =>
+      Wallet.rehydrate({
+        id: '',
+        playerId: 'player-1',
+        balance: money('100.00'),
+        version: 1,
+        updatedAt: new Date('2026-01-01T12:00:00.000Z'),
+      }),
+    ).toThrow('Wallet id is required');
+  });
+
+  it('rejects a persisted wallet with a negative balance', () => {
+    expect(() =>
+      Wallet.rehydrate({
+        id: 'wallet-1',
+        playerId: 'player-1',
+        balance: money('10.00').negate(),
+        version: 1,
+        updatedAt: new Date('2026-01-01T12:00:00.000Z'),
+      }),
+    ).toThrow('Wallet balance cannot be negative');
+  });
+
+  it('rejects a persisted wallet with an invalid version', () => {
+    expect(() =>
+      Wallet.rehydrate({
+        id: 'wallet-1',
+        playerId: 'player-1',
+        balance: money('100.00'),
+        version: 0,
+        updatedAt: new Date('2026-01-01T12:00:00.000Z'),
+      }),
+    ).toThrow('Wallet version must be an integer greater than zero');
+  });
+
+  it('rejects a persisted wallet with an invalid date', () => {
+    expect(() =>
+      Wallet.rehydrate({
+        id: 'wallet-1',
+        playerId: 'player-1',
+        balance: money('100.00'),
+        version: 1,
+        updatedAt: new Date('invalid'),
+      }),
+    ).toThrow('Invalid wallet updatedAt date');
+  });
 });
