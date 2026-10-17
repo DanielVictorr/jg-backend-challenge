@@ -20,6 +20,7 @@
     "test:cov": "vitest run --coverage",
     "test:debug": "vitest --inspect-brk --no-file-parallelism",
     "test:e2e": "vitest run --config ./vitest.config.e2e.ts",
+    "test:integration": "vitest run --config ./vitest.config.integration.ts",
     "migration:run": "bunx typeorm migration:run -d dist/database/data-source.js",
     "migration:revert": "bunx typeorm migration:revert -d dist/database/data-source.js",
     "migration:show": "bunx typeorm migration:show -d dist/database/data-source.js"

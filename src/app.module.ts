@@ -3,15 +3,15 @@ import { Module } from '@nestjs/common';
 import { ConfigModule, ConfigService } from '@nestjs/config';
 import { TypeOrmModule } from '@nestjs/typeorm';
 import { createObserveModule } from '@nestjs/observe';
-
+import { ProcessWagerTransaction } from './application/wagering/process-wager-transaction.js';
 import { WalletEntity } from './database/entities/wallet.entity.js';
 import { LedgerEntryEntity } from './database/entities/ledger-entry.entity.js';
 import { WagerTransactionEntity } from './database/entities/wager-transaction.entity.js';
-
 import { AppController } from './app.controller.js';
 import { AppService } from './app.service.js';
 import { CreateWallet } from './application/wallet/create-wallet.js';
 import { WalletsController } from './application/wallet/wallets.controller.js';
+import { WageringController } from './application/wagering/wagering.controller.js';
 
 export const { ObserveModule, ObserveInstrument } = createObserveModule();
 
@@ -49,7 +49,15 @@ export const { ObserveModule, ObserveInstrument } = createObserveModule();
       serviceId: 'jg-backend-challenge',
     }),
   ],
-  controllers: [AppController, WalletsController],
-  providers: [AppService, CreateWallet],
+  controllers: [
+    AppController,
+    WalletsController,
+    WageringController,
+  ],
+  providers: [
+    AppService,
+    CreateWallet,
+    ProcessWagerTransaction,
+  ],
 })
 export class AppModule {}
