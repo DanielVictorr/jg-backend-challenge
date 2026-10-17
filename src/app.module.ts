@@ -1,4 +1,3 @@
-
 import { Module } from '@nestjs/common';
 import { ConfigModule, ConfigService } from '@nestjs/config';
 import { TypeOrmModule } from '@nestjs/typeorm';
@@ -13,6 +12,7 @@ import { CreateWallet } from './application/wallet/create-wallet.js';
 import { WalletsController } from './application/wallet/wallet.controller.js';
 import { WageringController } from './application/wagering/wagering.controller.js';
 import { GetWallet } from './application/wallet/get-wallet.js';
+import { GetWalletLedger } from './application/wallet/get-wallet-ledger.js';
 
 export const { ObserveModule, ObserveInstrument } = createObserveModule();
 
@@ -60,6 +60,7 @@ export const { ObserveModule, ObserveInstrument } = createObserveModule();
     CreateWallet,
     ProcessWagerTransaction,
     GetWallet,
+    GetWalletLedger,
   ],
   
 })
