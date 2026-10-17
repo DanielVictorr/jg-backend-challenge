@@ -10,8 +10,9 @@ import { WagerTransactionEntity } from './database/entities/wager-transaction.en
 import { AppController } from './app.controller.js';
 import { AppService } from './app.service.js';
 import { CreateWallet } from './application/wallet/create-wallet.js';
-import { WalletsController } from './application/wallet/wallets.controller.js';
+import { WalletsController } from './application/wallet/wallet.controller.js';
 import { WageringController } from './application/wagering/wagering.controller.js';
+import { GetWallet } from './application/wallet/get-wallet.js';
 
 export const { ObserveModule, ObserveInstrument } = createObserveModule();
 
@@ -58,6 +59,8 @@ export const { ObserveModule, ObserveInstrument } = createObserveModule();
     AppService,
     CreateWallet,
     ProcessWagerTransaction,
+    GetWallet,
   ],
+  
 })
 export class AppModule {}
