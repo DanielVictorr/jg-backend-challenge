@@ -1,8 +1,8 @@
 # JG Backend Challenge
 
-API de processamento distribuído de transações de apostas, construída com NestJS, TypeScript, Bun, PostgreSQL e AWS SQS. O projeto prioriza consistência financeira, idempotência persistente, concorrência segura por carteira e recuperação após falhas.
+API de processamento de transações de apostas, desenvolvida com NestJS, TypeScript, Bun, PostgreSQL e AWS SQS. O PostgreSQL mantém o estado financeiro como fonte de verdade; transações, ledger, idempotência e Outbox trabalham em conjunto para preservar consistência diante de concorrência, mensagens repetidas e falhas temporárias.
 
-> Este arquivo documenta o estado atual do repositório. Consulte também o [README.md](./README.md) para o enunciado original do desafio e o [ARCHITECTURE.md](./ARCHITECTURE.md) para decisões, trade-offs e limitações arquiteturais.
+As decisões de arquitetura, os trade-offs e as limitações conhecidas estão documentados em [ARCHITECTURE.md](./ARCHITECTURE.md).
 
 ## Conteúdo
 
