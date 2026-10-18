@@ -24,4 +24,10 @@ awslocal sqs create-queue \
   --queue-name wager-transactions.fifo \
   --attributes file:///tmp/main-queue-attributes.json
 
+echo "Criando fila de saída dos eventos da Outbox..."
+
+awslocal sqs create-queue \
+  --queue-name wager-transaction-events.fifo \
+  --attributes FifoQueue=true,ContentBasedDeduplication=true
+
 echo "Filas SQS configuradas."

@@ -178,7 +178,7 @@ export class CreateWallet {
             eventId: balanceChangedEventId,
             eventType: 'WalletBalanceChanged',
             aggregateId: walletId,
-            correlationId: walletId,
+            correlationId: transactionId,
             occurredAt: now.toISOString(),
             version: 1,
             data: {
@@ -196,7 +196,7 @@ export class CreateWallet {
             eventId: transactionProcessedEventId,
             eventType: 'WagerTransactionProcessed',
             aggregateId: walletId,
-            correlationId: walletId,
+            correlationId: transactionId,
             occurredAt: now.toISOString(),
             version: 1,
             data: {

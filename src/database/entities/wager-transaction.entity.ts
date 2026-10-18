@@ -25,6 +25,19 @@ import {
   ['providerId', 'referenceExternalTransactionId'],
   { where: '"reference_external_transaction_id" IS NOT NULL' },
 )
+
+@Index(
+  'uq_wagering_processed_reversal_reference',
+  ['referenceTransactionId', 'kind'],
+  {
+    unique: true,
+    where:
+      `"status" = 'PROCESSED' ` +
+      `AND "reference_transaction_id" IS NOT NULL ` +
+      `AND "kind" IN ('REFUND', 'ROLLBACK')`,
+  },
+)
+
 export class WagerTransactionEntity {
   @PrimaryColumn('uuid')
   id!: string;
@@ -110,6 +123,27 @@ export class WagerTransactionEntity {
     nullable: true,
   })
   processedAt!: Date | null;
+
+    @Column({
+    name: 'reference_retry_count',
+    type: 'integer',
+    default: 0,
+  })
+  referenceRetryCount!: number;
+
+  @Column({
+    name: 'reference_next_retry_at',
+    type: 'timestamptz',
+    nullable: true,
+  })
+  referenceNextRetryAt!: Date | null;
+
+  @Column({
+    name: 'reference_expires_at',
+    type: 'timestamptz',
+    nullable: true,
+  })
+  referenceExpiresAt!: Date | null;
 
   @CreateDateColumn({
     name: 'created_at',

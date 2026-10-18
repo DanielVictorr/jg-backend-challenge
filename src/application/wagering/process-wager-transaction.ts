@@ -1,9 +1,9 @@
-
 import {
   BadRequestException,
   ConflictException,
   Injectable,
   NotFoundException,
+  InternalServerErrorException
 } from '@nestjs/common';
 import { DataSource, QueryFailedError } from 'typeorm';
 import { randomUUID } from 'node:crypto';
@@ -14,6 +14,7 @@ import {
   FailureCode,
   WagerTransaction,
   WagerTransactionKind,
+  WagerTransactionStatus,
 } from '../../domain/wagering/wager-transaction.js';
 
 import { WalletEntity } from '../../database/entities/wallet.entity.js';
@@ -26,8 +27,7 @@ import {
   type WagerBusinessPayload,
 } from './canonical-payload.js';
 
-export interface ProcessWagerTransactionInput
-  extends WagerBusinessPayload {
+export interface ProcessWagerTransactionInput extends WagerBusinessPayload {
   idempotencyKey: string;
 }
 
@@ -44,24 +44,64 @@ export interface ProcessWagerTransactionOutput {
   idempotentReplay: boolean;
 }
 
+export interface InboxMessageContext {
+  consumerName: string;
+  messageId: string;
+  payloadHash: string;
+}
+
+export interface InboxDuplicateResult {
+  duplicateMessage: true;
+}
+
 @Injectable()
 export class ProcessWagerTransaction {
   constructor(private readonly dataSource: DataSource) {}
 
+    async execute(
+    input: ProcessWagerTransactionInput,
+  ): Promise<ProcessWagerTransactionOutput>;
+
   async execute(
     input: ProcessWagerTransactionInput,
-  ): Promise<ProcessWagerTransactionOutput> {
+    inboxContext: InboxMessageContext,
+  ): Promise<ProcessWagerTransactionOutput | InboxDuplicateResult>;
+
+  async execute(
+    input: ProcessWagerTransactionInput,
+    inboxContext?: InboxMessageContext,
+  ): Promise<ProcessWagerTransactionOutput | InboxDuplicateResult> {
     this.validateInput(input);
+
+    if (inboxContext) {
+      if (
+        typeof inboxContext.consumerName !== 'string' ||
+        !inboxContext.consumerName.trim() ||
+        inboxContext.consumerName.length > 100 ||
+        typeof inboxContext.messageId !== 'string' ||
+        !inboxContext.messageId.trim() ||
+        inboxContext.messageId.length > 255 ||
+        typeof inboxContext.payloadHash !== 'string' ||
+        !/^[a-f0-9]{64}$/.test(inboxContext.payloadHash)
+      ) {
+        throw new BadRequestException({
+          code: 'INVALID_INBOX_CONTEXT',
+          message: 'O contexto da mensagem recebida é inválido.',
+        });
+      }
+    }
 
     if (
       input.kind !== WagerTransactionKind.Bet &&
       input.kind !== WagerTransactionKind.Win &&
-      input.kind !== WagerTransactionKind.Loss
+      input.kind !== WagerTransactionKind.Loss &&
+      input.kind !== WagerTransactionKind.Refund &&
+      input.kind !== WagerTransactionKind.Rollback
     ) {
       throw new BadRequestException({
         code: 'UNSUPPORTED_TRANSACTION_KIND',
         message:
-          'Esta versão aceita somente BET, WIN e LOSS.',
+          'OPENING é uma operação interna. Tipo de transação não suportado.',
       });
     }
 
@@ -80,6 +120,81 @@ export class ProcessWagerTransaction {
 
     try {
       return await this.dataSource.transaction(async (manager) => {
+
+
+        const markInboxProcessed = async (): Promise<void> => {
+          if (!inboxContext) {
+            return;
+          }
+
+          await manager.query(
+            `UPDATE processed_messages
+                SET processed_at = NOW()
+              WHERE consumer_name = $1
+                AND message_id = $2
+                AND processed_at IS NULL`,
+            [inboxContext.consumerName, inboxContext.messageId],
+          );
+        };
+
+
+        if (inboxContext) {
+  const insertedRows: Array<{ message_id: string }> =
+    await manager.query(
+      `INSERT INTO processed_messages
+        (consumer_name, message_id, payload_hash)
+       VALUES ($1, $2, $3)
+       ON CONFLICT (consumer_name, message_id) DO NOTHING
+       RETURNING message_id`,
+      [
+        inboxContext.consumerName,
+        inboxContext.messageId,
+        inboxContext.payloadHash,
+      ],
+    );
+
+  if (insertedRows.length === 0) {
+    const existingRows: Array<{
+      payload_hash: string | null;
+      processed_at: Date | string | null;
+    }> = await manager.query(
+      `SELECT payload_hash, processed_at
+        FROM processed_messages
+        WHERE consumer_name = $1
+          AND message_id = $2`,
+      [inboxContext.consumerName, inboxContext.messageId],
+    );
+
+    const existingInbox = existingRows[0];
+
+    if (!existingInbox || !existingInbox.payload_hash) {
+      throw new ConflictException({
+        code: 'INBOX_PAYLOAD_HASH_UNAVAILABLE',
+        message:
+          'A mensagem já existe no Inbox, mas não possui hash verificável.',
+      });
+    }
+
+    if (existingInbox.payload_hash !== inboxContext.payloadHash) {
+      throw new ConflictException({
+        code: 'INBOX_MESSAGE_ID_REUSED',
+        message:
+          'O messageId já foi utilizado com um conteúdo diferente.',
+      });
+    }
+
+    if (existingInbox.processed_at === null) {
+      throw new InternalServerErrorException({
+        code: 'INBOX_MESSAGE_NOT_COMPLETED',
+        message:
+          'A mensagem existe no Inbox, mas seu processamento ainda não foi confirmado.',
+      });
+    }
+
+    return { duplicateMessage: true };
+  }
+}
+
         // Serializa somente operações sobre esta carteira.
         const lockedWallets = await manager.query(
           `SELECT id
@@ -96,8 +211,9 @@ export class ProcessWagerTransaction {
           });
         }
 
-        const transactionRepository =
-          manager.getRepository(WagerTransactionEntity);
+        const transactionRepository = manager.getRepository(
+          WagerTransactionEntity,
+        );
 
         // Verifica a idempotência depois de obter o bloqueio da carteira.
         const existing = await transactionRepository.findOne({
@@ -119,33 +235,31 @@ export class ProcessWagerTransaction {
           if (!existing.responseSnapshot) {
             throw new ConflictException({
               code: 'TRANSACTION_RESULT_UNAVAILABLE',
-              message:
-                'A transação existente não possui resultado armazenado.',
+              message: 'A transação existente não possui resultado armazenado.',
             });
           }
 
+          await markInboxProcessed();
+
           return {
-            ...(existing.responseSnapshot as unknown as
-              ProcessWagerTransactionOutput),
+            ...(existing.responseSnapshot as unknown as ProcessWagerTransactionOutput),
             idempotentReplay: true,
           };
         }
 
         // A identidade externa também precisa ser única,
         // mesmo quando o cliente usa outra chave de idempotência.
-        const existingExternal =
-          await transactionRepository.findOne({
-            where: {
-              providerId: input.providerId,
-              externalTransactionId: input.externalTransactionId,
-            },
-          });
+        const existingExternal = await transactionRepository.findOne({
+          where: {
+            providerId: input.providerId,
+            externalTransactionId: input.externalTransactionId,
+          },
+        });
 
         if (existingExternal) {
           throw new ConflictException({
             code: 'EXTERNAL_TRANSACTION_ALREADY_EXISTS',
-            message:
-              'Já existe uma transação com esse identificador externo.',
+            message: 'Já existe uma transação com esse identificador externo.',
           });
         }
 
@@ -189,10 +303,91 @@ export class ProcessWagerTransaction {
 
         const balanceBefore = wallet.balance;
         let failureCode: FailureCode | undefined;
+        let pendingReference = false;
+        let referenceTransactionId: string | null = null;
+        let referenceEntity: WagerTransactionEntity | null = null;
 
         if (money.currency !== wallet.balance.currency) {
           failureCode = FailureCode.InvalidTransaction;
-          transaction.reject(failureCode);
+        } else if (
+          input.kind === WagerTransactionKind.Refund ||
+          input.kind === WagerTransactionKind.Rollback
+        ) {
+          referenceEntity =
+            (await transactionRepository.findOne({
+              where: {
+                providerId: input.providerId,
+                externalTransactionId: input.referenceExternalTransactionId!,
+              },
+            })) ?? null;
+
+          if (!referenceEntity) {
+            transaction.markPendingReference();
+            pendingReference = true;
+          } else {
+            const referenceKind = referenceEntity.kind;
+            const isValidReferenceKind =
+              input.kind === WagerTransactionKind.Refund
+                ? referenceKind === WagerTransactionKind.Bet
+                : referenceKind === WagerTransactionKind.Bet ||
+                  referenceKind === WagerTransactionKind.Win ||
+                  referenceKind === WagerTransactionKind.Refund;
+
+            const isValidReferenceContext =
+              referenceEntity.status === WagerTransactionStatus.Processed &&
+              referenceEntity.playerId === input.playerId &&
+              referenceEntity.walletId === input.walletId &&
+              referenceEntity.roundId === input.roundId &&
+              referenceEntity.currency === money.currency;
+
+            if (!isValidReferenceKind || !isValidReferenceContext) {
+              failureCode = FailureCode.InvalidReference;
+            } else {
+              const referenceMoney = Money.from({
+                amount: referenceEntity.amount,
+                currency: referenceEntity.currency,
+              });
+
+              if (!money.equals(referenceMoney)) {
+                failureCode = FailureCode.ReferenceAmountMismatch;
+              } else {
+                const existingReversal = await transactionRepository.findOne({
+                  where: {
+                    providerId: input.providerId,
+                    referenceTransactionId: referenceEntity.id,
+                    kind: input.kind as WagerTransactionKind,
+                    status: WagerTransactionStatus.Processed,
+                  },
+                });
+
+                if (existingReversal) {
+                  failureCode = FailureCode.ReferenceAlreadyReversed;
+                } else {
+                  try {
+                    if (input.kind === WagerTransactionKind.Refund) {
+                      wallet.credit(money);
+                    } else if (referenceKind === WagerTransactionKind.Bet) {
+                      wallet.credit(money);
+                    } else {
+                      wallet.debit(money);
+                    }
+
+                    referenceTransactionId = referenceEntity.id;
+                  } catch (error) {
+                    if (
+                      error instanceof Error &&
+                      error.message === 'Insufficient wallet balance'
+                    ) {
+                      failureCode =
+                        FailureCode.ReversalWouldCauseNegativeBalance;
+                    } else {
+                      throw error;
+                    }
+                  }
+                }
+              }
+            }
+          }
         } else if (input.kind === WagerTransactionKind.Bet) {
           try {
             wallet.debit(money);
@@ -202,7 +397,6 @@ export class ProcessWagerTransaction {
               error.message === 'Insufficient wallet balance'
             ) {
               failureCode = FailureCode.InsufficientFunds;
-              transaction.reject(failureCode);
             } else {
               throw error;
             }
@@ -211,9 +405,14 @@ export class ProcessWagerTransaction {
           wallet.credit(money);
         }
 
-        // LOSS não altera o saldo e não gera lançamento contábil.
-        if (!failureCode) {
-          transaction.markProcessed(undefined, new Date());
+        // Rejeições são terminais. Uma referência ausente permanece pendente.
+        if (failureCode) {
+          transaction.reject(failureCode);
+        } else if (!pendingReference) {
+          transaction.markProcessed(
+            referenceTransactionId ?? undefined,
+            new Date(),
+          );
         }
 
         const balanceAfter = wallet.balance;
@@ -226,6 +425,13 @@ export class ProcessWagerTransaction {
           ...(failureCode ? { failureCode } : {}),
           idempotentReplay: false,
         };
+        const referenceNextRetryAt = pendingReference
+          ? new Date(Date.now() + 5_000)
+          : null;
+
+        const referenceExpiresAt = pendingReference
+          ? new Date(transaction.createdAt.getTime() + 24 * 60 * 60 * 1_000)
+          : null;
 
         await transactionRepository.save(
           transactionRepository.create({
@@ -244,10 +450,14 @@ export class ProcessWagerTransaction {
             currency: money.currency,
             referenceExternalTransactionId:
             transaction.referenceExternalTransactionId ?? null,
-            referenceTransactionId: null,
+            referenceTransactionId,
             failureCode: transaction.failureCode ?? null,
             responseSnapshot: { ...result },
             processedAt: transaction.processedAt ?? null,
+            referenceRetryCount: 0,
+            referenceNextRetryAt,
+            referenceExpiresAt,
+
           }),
         );
 
@@ -260,7 +470,9 @@ export class ProcessWagerTransaction {
           });
 
           const ledgerType =
-            input.kind === WagerTransactionKind.Bet
+            input.kind === WagerTransactionKind.Bet ||
+            (input.kind === WagerTransactionKind.Rollback &&
+              referenceEntity?.kind !== WagerTransactionKind.Bet)
               ? 'DEBIT'
               : 'CREDIT';
 
@@ -274,7 +486,7 @@ export class ProcessWagerTransaction {
             balanceAfter,
           });
 
-            const ledgerRepository = manager.getRepository(LedgerEntryEntity);
+          const ledgerRepository = manager.getRepository(LedgerEntryEntity);
 
           await ledgerRepository.save(
             ledgerRepository.create({
@@ -296,6 +508,7 @@ export class ProcessWagerTransaction {
             eventId: balanceEventId,
             eventType: 'WalletBalanceChanged',
             aggregateId: wallet.id,
+            correlationId: transaction.id,
             occurredAt: new Date().toISOString(),
             version: 1,
             data: {
@@ -324,23 +537,32 @@ export class ProcessWagerTransaction {
         }
 
         const transactionEventId = randomUUID();
-        const eventType = failureCode
-          ? 'WagerTransactionRejected'
-          : 'WagerTransactionProcessed';
+        const eventType = pendingReference
+          ? 'WagerTransactionPendingReference'
+          : failureCode
+            ? 'WagerTransactionRejected'
+            : 'WagerTransactionProcessed';
 
         const transactionEvent = {
-          eventId: transactionEventId,
-          eventType,
-          aggregateId: wallet.id,
-          occurredAt: new Date().toISOString(),
-          version: 1,
-          data: {
+            eventId: transactionEventId,
+            eventType,
+            aggregateId: wallet.id,
+            correlationId: transaction.id,
+            occurredAt: new Date().toISOString(),
+            version: 1,
+            data: {
             transactionId: transaction.id,
             walletId: wallet.id,
             playerId: wallet.playerId,
             kind: transaction.kind,
             status: transaction.status,
             ...(failureCode ? { failureCode } : {}),
+            ...(transaction.referenceExternalTransactionId
+              ? {
+                  referenceExternalTransactionId:
+                    transaction.referenceExternalTransactionId,
+                }
+              : {}),
           },
         };
 
@@ -357,6 +579,7 @@ export class ProcessWagerTransaction {
           ],
         );
 
+        await markInboxProcessed();
         return result;
       });
     } catch (error) {
@@ -370,8 +593,7 @@ export class ProcessWagerTransaction {
 
         if (
           driverError.code === '23505' &&
-          driverError.constraint ===
-            'uq_wagering_provider_idempotency'
+          driverError.constraint === 'uq_wagering_provider_idempotency'
         ) {
           const existing = await this.dataSource
             .getRepository(WagerTransactionEntity)
@@ -391,25 +613,105 @@ export class ProcessWagerTransaction {
               });
             }
 
+            if (!existing.responseSnapshot) {
+              throw new ConflictException({
+                code: 'TRANSACTION_RESULT_UNAVAILABLE',
+                message: 'A transação existente não possui resultado armazenado.',
+              });
+            }
+
             if (existing.responseSnapshot) {
-              return {
-                ...(existing.responseSnapshot as unknown as
-                  ProcessWagerTransactionOutput),
+              const response = {
+                ...(existing.responseSnapshot as unknown as ProcessWagerTransactionOutput),
                 idempotentReplay: true,
               };
+
+              if (!inboxContext) {
+                return response;
+              }
+
+              return await this.dataSource.transaction(async (manager) => {
+                const insertedRows: Array<{ message_id: string }> =
+                  await manager.query(
+                    `INSERT INTO processed_messages
+                      (consumer_name, message_id, payload_hash)
+                    VALUES ($1, $2, $3)
+                    ON CONFLICT (consumer_name, message_id) DO NOTHING
+                    RETURNING message_id`,
+                    [
+                      inboxContext.consumerName,
+                      inboxContext.messageId,
+                      inboxContext.payloadHash,
+                    ],
+                  );
+
+
+
+                if (insertedRows.length === 0) {
+                  const existingRows: Array<{
+                    payload_hash: string | null;
+                    processed_at: Date | string | null;
+                  }> = await manager.query(
+                    `SELECT payload_hash, processed_at
+                      FROM processed_messages
+                      WHERE consumer_name = $1
+                        AND message_id = $2`,
+                    [inboxContext.consumerName, inboxContext.messageId],
+                  );
+
+
+                  const existingInbox = existingRows[0];
+
+                  if (!existingInbox?.payload_hash) {
+                    throw new ConflictException({
+                      code: 'INBOX_PAYLOAD_HASH_UNAVAILABLE',
+                      message: 'A mensagem existente não possui hash verificável.',
+                    });
+                  }
+
+                  if (existingInbox.payload_hash !== inboxContext.payloadHash) {
+                    throw new ConflictException({
+                      code: 'INBOX_MESSAGE_ID_REUSED',
+                      message: 'O messageId foi reutilizado com conteúdo diferente.',
+                    });
+                  }
+
+
+                  if (existingInbox.processed_at === null) {
+                    throw new InternalServerErrorException({
+                      code: 'INBOX_MESSAGE_NOT_COMPLETED',
+                      message:
+                        'A mensagem existe no Inbox, mas seu processamento ainda não foi confirmado.',
+                    });
+                  }
+
+
+                  return { duplicateMessage: true };
+                }
+
+                await manager.query(
+                  `UPDATE processed_messages
+                      SET processed_at = NOW()
+                    WHERE consumer_name = $1
+                      AND message_id = $2
+                      AND processed_at IS NULL`,
+                  [inboxContext.consumerName, inboxContext.messageId],
+                );
+
+                return response;
+              });
             }
+
           }
         }
 
         if (
           driverError.code === '23505' &&
-          driverError.constraint ===
-            'uq_wagering_provider_external_transaction'
+          driverError.constraint === 'uq_wagering_provider_external_transaction'
         ) {
           throw new ConflictException({
             code: 'EXTERNAL_TRANSACTION_ALREADY_EXISTS',
-            message:
-              'Já existe uma transação com esse identificador externo.',
+            message: 'Já existe uma transação com esse identificador externo.',
           });
         }
       }
@@ -437,10 +739,7 @@ export class ProcessWagerTransaction {
     ] as const;
 
     for (const field of requiredStrings) {
-      if (
-        typeof input[field] !== 'string' ||
-        !input[field].trim()
-      ) {
+      if (typeof input[field] !== 'string' || !input[field].trim()) {
         throw new BadRequestException({
           code: 'INVALID_REQUEST',
           message: `${field} é obrigatório.`,
@@ -465,9 +764,7 @@ export class ProcessWagerTransaction {
     if (
       !input.money ||
       typeof input.money.amount !== 'string' ||
-      !/^(?:0|[1-9]\d{0,17})(?:\.\d{1,2})?$/.test(
-        input.money.amount,
-      ) ||
+      !/^(?:0|[1-9]\d{0,17})(?:\.\d{1,2})?$/.test(input.money.amount) ||
       typeof input.money.currency !== 'string' ||
       !/^[A-Z]{3}$/.test(input.money.currency)
     ) {

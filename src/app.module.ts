@@ -15,6 +15,9 @@ import { GetWallet } from './application/wallet/get-wallet.js';
 import { GetWalletLedger } from './application/wallet/get-wallet-ledger.js';
 import { GetWagerTransaction } from './application/wagering/get-wager-transaction.js';
 import { ProviderWageringTransactionsController } from './application/wagering/provider-wagering-transactions.controller.js';
+import { RetryPendingReferences } from './application/wagering/retry-pending-references.js';
+import { OutboxPublisher } from './infrastructure/outbox/outbox-publisher.js';
+import { WagerTransactionConsumer } from './infrastructure/sqs/wager-transaction-consumer.js';
 
 export const { ObserveModule, ObserveInstrument } = createObserveModule();
 
@@ -59,13 +62,16 @@ export const { ObserveModule, ObserveInstrument } = createObserveModule();
     ProviderWageringTransactionsController,
   ],
   providers: [
-    AppService,
-    CreateWallet,
-    ProcessWagerTransaction,
-    GetWagerTransaction,
-    GetWallet,
-    GetWalletLedger,
-  ],
+  AppService,
+  CreateWallet,
+  ProcessWagerTransaction,
+  GetWagerTransaction,
+  GetWallet,
+  GetWalletLedger,
+  RetryPendingReferences,
+  OutboxPublisher,
+  WagerTransactionConsumer,
+],
   
 })
 export class AppModule {}
