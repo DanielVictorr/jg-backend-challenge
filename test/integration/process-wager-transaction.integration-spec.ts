@@ -1,4 +1,6 @@
 import { randomUUID } from 'node:crypto';
+import { spawn } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { DataSource } from 'typeorm';
 import { calculateWagerPayloadHash } from '../../src/application/wagering/canonical-payload.js';
@@ -8,6 +10,14 @@ import { WagerTransactionEntity } from '../../src/database/entities/wager-transa
 import { RetryPendingReferences } from '../../src/application/wagering/retry-pending-references.js';
 import { CreateWallet } from '../../src/application/wallet/create-wallet.js';
 import { ProcessWagerTransaction } from '../../src/application/wagering/process-wager-transaction.js';
+function reconstructBalance(entries: LedgerEntryEntity[]): string {
+    const cents = entries.reduce((balance, entry) => {
+        const [whole, fraction = ''] = entry.amount.split('.');
+        const amount = BigInt(whole ?? '0') * 100n + BigInt(fraction.padEnd(2, '0'));
+        return entry.entryType === 'CREDIT' ? balance + amount : balance - amount;
+    }, 0n);
+    return `${cents / 100n}.${(cents % 100n).toString().padStart(2, '0')}`;
+}
 describe('ProcessWagerTransaction — integração PostgreSQL', () => {
     let dataSource: DataSource;
     let createWallet: CreateWallet;
@@ -344,6 +354,93 @@ describe('ProcessWagerTransaction — integração PostgreSQL', () => {
          AND payload->>'correlationId' = $3`, [wallet.id, 'WalletBalanceChanged', originalResult.transactionId]);
         expect(balanceChangedEvents).toHaveLength(1);
         expect(balanceChangedEvents[0].wallet_version).toBe('2');
+    });
+    it('deve processar operações de carteiras distintas em paralelo', async () => {
+        const first = await createScenario('100.00');
+        const second = await createScenario('100.00');
+        const [firstResult, secondResult] = await Promise.all([
+            processWager.execute(first.transaction('parallel-wallet-a', 'BET', '25.00')),
+            processWager.execute(second.transaction('parallel-wallet-b', 'BET', '35.00')),
+        ]);
+        expect(firstResult.status).toBe('PROCESSED');
+        expect(secondResult.status).toBe('PROCESSED');
+        const [firstWallet, secondWallet] = await Promise.all([
+            dataSource.getRepository(WalletEntity).findOneByOrFail({ id: first.wallet.id }),
+            dataSource.getRepository(WalletEntity).findOneByOrFail({ id: second.wallet.id }),
+        ]);
+        expect(firstWallet.balance).toBe('75.00');
+        expect(secondWallet.balance).toBe('65.00');
+        const [firstLedger, secondLedger] = await Promise.all([
+            dataSource.getRepository(LedgerEntryEntity).find({ where: { walletId: first.wallet.id } }),
+            dataSource.getRepository(LedgerEntryEntity).find({ where: { walletId: second.wallet.id } }),
+        ]);
+        expect(firstLedger.filter((entry) => entry.entryType === 'DEBIT')).toHaveLength(1);
+        expect(secondLedger.filter((entry) => entry.entryType === 'DEBIT')).toHaveLength(1);
+        expect(firstWallet.balance).toBe(reconstructBalance(firstLedger));
+        expect(secondWallet.balance).toBe(reconstructBalance(secondLedger));
+    });
+    it('deve serializar operações concorrentes originadas em três processos independentes', async () => {
+        const { wallet, transaction } = await createScenario('100.00');
+        const workerPath = fileURLToPath(new URL('./helpers/process-wager-worker.ts', import.meta.url));
+        const inputs = [
+            transaction('multi-process-a', 'BET', '10.00'),
+            transaction('multi-process-b', 'BET', '15.00'),
+            transaction('multi-process-c', 'BET', '20.00'),
+        ];
+        const outputs = await Promise.all(inputs.map(async (input) => {
+            const child = spawn('bun', ['run', workerPath, JSON.stringify({
+                mode: 'execute',
+                input,
+            })], {
+                cwd: process.cwd(),
+                env: process.env,
+            });
+            let stdout = '';
+            let stderr = '';
+            const exitCode = await new Promise<number>((resolve, reject) => {
+                const timeout = setTimeout(() => {
+                    child.kill();
+                    reject(new Error('Tempo esgotado aguardando o processo de integração.'));
+                }, 60000);
+                child.stdout.setEncoding('utf8');
+                child.stderr.setEncoding('utf8');
+                child.stdout.on('data', (chunk: string) => {
+                    stdout += chunk;
+                });
+                child.stderr.on('data', (chunk: string) => {
+                    stderr += chunk;
+                });
+                child.once('error', (error) => {
+                    clearTimeout(timeout);
+                    reject(error);
+                });
+                child.once('close', (code) => {
+                    clearTimeout(timeout);
+                    resolve(code ?? 1);
+                });
+            });
+            if (exitCode !== 0) {
+                throw new Error(`Processo de integração falhou: ${stderr || stdout}`);
+            }
+            return JSON.parse(stdout.trim()) as {
+                status: string;
+                balance: { amount: string };
+            };
+        }));
+        expect(outputs.map((output) => output.status)).toEqual([
+            'PROCESSED',
+            'PROCESSED',
+            'PROCESSED',
+        ]);
+        const persistedWallet = await dataSource
+            .getRepository(WalletEntity)
+            .findOneByOrFail({ id: wallet.id });
+        expect(persistedWallet.balance).toBe('55.00');
+        const ledgerEntries = await dataSource
+            .getRepository(LedgerEntryEntity)
+            .find({ where: { walletId: wallet.id } });
+        expect(ledgerEntries.filter((entry) => entry.entryType === 'DEBIT')).toHaveLength(3);
+        expect(persistedWallet.balance).toBe(reconstructBalance(ledgerEntries));
     });
     it('deve rejeitar payloads diferentes concorrentes com a mesma chave de idempotência', async () => {
         const { wallet, transaction } = await createScenario();

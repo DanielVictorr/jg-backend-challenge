@@ -43,6 +43,7 @@ const validBody = JSON.stringify({
 function createConsumer(options?: {
     enabled?: boolean;
     queueUrl?: string;
+    visibilityTimeoutSeconds?: string;
     execute?: ReturnType<typeof vi.fn>;
 }) {
     const config = {
@@ -50,6 +51,7 @@ function createConsumer(options?: {
             const values: Record<string, string> = {
                 SQS_CONSUMER_ENABLED: String(options?.enabled ?? false),
                 SQS_QUEUE_URL: options?.queueUrl ?? 'http://localhost:4566/test-queue',
+                SQS_VISIBILITY_TIMEOUT_SECONDS: options?.visibilityTimeoutSeconds ?? '60',
                 AWS_REGION: 'us-east-1',
                 AWS_ACCESS_KEY_ID: 'test',
                 AWS_SECRET_ACCESS_KEY: 'test',
@@ -94,6 +96,11 @@ describe('WagerTransactionConsumer', () => {
         const { consumer } = createConsumer();
         consumer.onModuleInit();
         expect(sqsMocks.send).not.toHaveBeenCalled();
+    });
+    it('usa timeout de visibilidade configurável e valida o intervalo', () => {
+        const { consumer } = createConsumer({ visibilityTimeoutSeconds: '7' });
+        expect((consumer as unknown as { visibilityTimeoutSeconds: number }).visibilityTimeoutSeconds).toBe(7);
+        expect(() => createConsumer({ visibilityTimeoutSeconds: '43201' })).toThrow(RangeError);
     });
     it('registra mensagem inválida deixada para redrive à DLQ', async () => {
         const { consumer, processor, counter, increment } = createConsumer();

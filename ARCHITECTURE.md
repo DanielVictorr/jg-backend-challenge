@@ -43,6 +43,7 @@ Os casos de uso de carteira e apostas (`CreateWallet`, `GetWallet`, `GetWalletLe
 `WagerTransactionConsumer` e `OutboxPublisher` são providers com hooks de ciclo de vida do NestJS:
 
 - `WagerTransactionConsumer` só inicia polling quando `SQS_CONSUMER_ENABLED=true`; nesse modo exige `SQS_QUEUE_URL`.
+- O timeout de visibilidade solicitado pelo consumer é configurável por `SQS_VISIBILITY_TIMEOUT_SECONDS` (padrão de 60 segundos; intervalo de 0 a 43200).
 - `OutboxPublisher` inicia por padrão e só é desabilitado explicitamente com `OUTBOX_PUBLISHER_ENABLED=false`.
 
 Essa composição mantém a inicialização simples para o desafio, mas implica que API HTTP, worker SQS, retry de referências e publisher da Outbox compartilham o mesmo processo e ciclo de deploy. Uma evolução operacional seria separar API e workers em processos/deployments dedicados, mantendo os mesmos casos de uso e garantias persistentes.
@@ -55,7 +56,9 @@ O projeto usa TypeORM, opção permitida pelo desafio, em vez de MikroORM. A esc
 
 ### Observabilidade
 
-O código usa @nestjs/observe e TracerService para registrar contadores e métricas, especialmente para:
+Os logs do consumer e do publisher são serializados como JSON e incluem os identificadores disponíveis em cada fluxo (`correlationId`, `messageId`, `transactionId`, `walletId` e `providerId` quando aplicáveis), sem incluir o payload financeiro. As métricas usam `@nestjs/observe` e `TracerService` e só são registradas se `OBSERVE_APP_KEY` e `OBSERVE_APP_SECRET` contiverem credenciais válidas.
+
+As métricas cobrem especialmente:
 
 - conflitos de lock;
 - latência de processamento de apostas;
@@ -304,11 +307,11 @@ A política do código é “persistir primeiro, confirmar depois, reprocessar c
 
 ## 11. Decisão de autenticação
 
-O código atual não implementa autenticação HTTP: não há `AuthGuard`, integração com Identity Provider nem abstração `ProviderIdentityPort` registrada como ponto de extensão. Assim, a aplicação não autentica a identidade de um provedor que chama as rotas HTTP; o campo `providerId` e as demais entradas continuam sujeitos às validações de formato e de negócio, mas isso não equivale a autenticação.
+O código ainda não valida tokens nem integra um Identity Provider. `ProviderAuthenticationGuard` está aplicado aos controllers HTTP que não são de health e permite todas as requisições; é um ponto de extensão explícito, não um controle de segurança. O campo `providerId` e as demais entradas continuam sujeitos às validações de formato e de negócio, mas isso não equivale a autenticação.
 
 O consumidor SQS é tratado como canal interno confiável pelo escopo do desafio. Essa confiança depende da configuração externa da fila e das permissões AWS; não é uma autenticação do provedor contido no payload.
 
-A decisão atual é manter autenticação fora do escopo implementado, não afirmar que exista uma extensão pronta. Para produção ou para atender integralmente à recomendação do README, deve-se adicionar um ponto de extensão explícito: autenticar chamadas HTTP via OIDC/JWT com um guard, associar a identidade autenticada ao provedor autorizado e não confiar em `providerId` enviado livremente pelo cliente. A fila deve continuar protegida por IAM e suas mensagens devem validar a identidade do provedor de acordo com as regras de domínio.
+Para produção ou para atender integralmente à recomendação do desafio, substitua o guard no-op por validação OIDC/JWT, associe a identidade autenticada ao provedor autorizado e não confie em `providerId` enviado livremente pelo cliente. A fila deve continuar protegida por IAM e suas mensagens devem validar a identidade do provedor de acordo com as regras de domínio.
 
 ## 12. Observabilidade e operação
 
@@ -330,17 +333,29 @@ Esses indicadores ajudam a distinguir:
 
 ## 13. Testes e validação arquitetural
 
-O projeto combina testes de unidade e integração para validar:
+O projeto usa Vitest para testes unitários, E2E e de integração. As suítes de integração conectam-se a PostgreSQL e LocalStack reais em containers; elas não substituem essas dependências por mocks para os cenários de persistência e mensageria.
 
-- regras de domínio;
-- criação e ajustes de carteira;
-- rejeição de transações inválidas;
-- idempotência e payload hash;
-- comportamento da Inbox e da Outbox;
-- processamento assíncrono via SQS;
-- recuperação de falhas e redelivery.
+### Cobertura implementada
 
-A validação da arquitetura não é apenas “a API respondeu”, mas sim: o saldo, o ledger, a transação e os eventos permanecem consistentes sob concorrência e retries.
+- **Unidade:** regras de `Money`, invariantes da carteira e transação, payload canônico, validações, idempotência e mapeamento de erros.
+- **PostgreSQL:** persistência das transações, ledger, Inbox e Outbox; constraints e imutabilidade do ledger; reconciliação e processamento de referências pendentes.
+- **Concorrência na camada de aplicação:** duas apostas disputando o saldo de uma carteira, 50 requisições idênticas em paralelo, reversões concorrentes e operações paralelas em carteiras diferentes.
+- **Concorrência entre processos:** três processos Bun independentes executam o caso de uso contra a mesma instância PostgreSQL; o teste verifica os resultados e compara o saldo final com o ledger.
+- **SQS/LocalStack:** envio e consumo de mensagem, Inbox e redelivery sem repetir o débito; publicação da Outbox por dois publishers concorrentes; retry após falha de publicação.
+- **Recuperação após commit:** um processo auxiliar recebe e processa a mensagem, confirma os efeitos no PostgreSQL e é encerrado com `SIGKILL` antes do ACK; a mensagem é então redeliverada ao consumer e os efeitos financeiros são conferidos para garantir que não sejam duplicados.
+- **DLQ:** o consumer de produção recebe uma mensagem inválida e o redrive do SQS/LocalStack é verificado após exceder o limite de recebimentos.
+- **HTTP/E2E:** smoke tests de liveness, readiness e validação de parâmetros das rotas principais, além do teste E2E da rota raiz.
+
+Nos cenários de concorrência e recuperação adicionados, o saldo materializado é comparado com o saldo reconstruído a partir dos lançamentos do ledger.
+
+### Limites da cobertura atual
+
+- O teste de três processos inicia processos independentes que chamam diretamente `ProcessWagerTransaction`; não inicia três instâncias completas do NestJS.
+- A simulação de crash executa o caso de uso e polling SQS em um processo Bun auxiliar; não inicia uma instância NestJS completa antes de encerrá-la à força.
+- O teste de DLQ usa o consumer de produção com uma fila de teste dedicada, não a fila principal do ambiente.
+- As provas de publisher concorrente cobrem duas instâncias do publisher no teste; não demonstram um deployment distribuído prolongado com falhas arbitrárias.
+
+Assim, os testes existentes cobrem os principais invariantes e vários cenários obrigatórios do README, mas não equivalem a uma prova exaustiva de todas as combinações de falhas, três ou mais instâncias completas, reinicialização de deployment ou indisponibilidade prolongada dos serviços externos.
 
 ## 14. Conclusão
 

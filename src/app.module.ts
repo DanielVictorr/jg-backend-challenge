@@ -21,6 +21,7 @@ import { WagerTransactionConsumer } from './infrastructure/sqs/wager-transaction
 import { ReconcileWallet } from './application/wallet/reconcile-wallet.js';
 import { HealthController } from './health/health.controller.js';
 import { HealthService } from './health/health.service.js';
+import { ProviderAuthenticationGuard } from './auth/provider-authentication.guard.js';
 export const { ObserveModule, ObserveInstrument } = createObserveModule();
 @Module({
     imports: [
@@ -72,6 +73,7 @@ export const { ObserveModule, ObserveInstrument } = createObserveModule();
         HealthController,
     ],
     providers: [
+        ProviderAuthenticationGuard,
         AppService,
         CreateWallet,
         ProcessWagerTransaction,

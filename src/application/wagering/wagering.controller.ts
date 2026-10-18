@@ -1,8 +1,10 @@
-import { BadRequestException, Body, Controller, Get, Headers, Param, ParseUUIDPipe, Post, } from '@nestjs/common';
+import { BadRequestException, Body, Controller, Get, Headers, Param, ParseUUIDPipe, Post, UseGuards, } from '@nestjs/common';
 import { ProcessWagerTransaction } from './process-wager-transaction.js';
 import { GetWagerTransaction } from './get-wager-transaction.js';
 import type { ProcessWagerTransactionInput } from './process-wager-transaction.js';
+import { ProviderAuthenticationGuard } from '../../auth/provider-authentication.guard.js';
 type ProcessWagerRequestBody = Omit<ProcessWagerTransactionInput, 'idempotencyKey'>;
+@UseGuards(ProviderAuthenticationGuard)
 @Controller('wagering')
 export class WageringController {
     constructor(private readonly processWagerTransaction: ProcessWagerTransaction, private readonly getWagerTransaction: GetWagerTransaction) { }

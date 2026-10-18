@@ -10,3 +10,5 @@ coverage/
 *.tsbuildinfo
 # Backups temporários de testes
 test/integration/*.backup.ts
+README2.md
+.tsupgrader/

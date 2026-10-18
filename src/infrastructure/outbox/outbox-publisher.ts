@@ -12,6 +12,9 @@ interface PendingOutboxEvent {
 }
 interface ClaimedOutboxEvent extends PendingOutboxEvent {
 }
+function isRecord(value: unknown): value is Record<string, unknown> {
+    return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
 const POLL_INTERVAL_MS = 1000;
 const BATCH_SIZE = 10;
 const MAX_RETRY_DELAY_MS = 15 * 60 * 1000;
@@ -47,13 +50,15 @@ export class OutboxPublisher implements OnModuleInit, OnModuleDestroy {
     }
     onModuleInit(): void {
         if (this.configService.get<string>('OUTBOX_PUBLISHER_ENABLED') === 'false') {
-            this.logger.log('Publicador da Outbox desabilitado por configuração.');
+            this.logger.log(JSON.stringify({
+                event: 'outbox_publisher_disabled',
+            }));
             return;
         }
         this.timer = setInterval(() => {
             void this.publishPending();
         }, POLL_INTERVAL_MS);
-        this.logger.log('Publicador da Outbox iniciado.');
+        this.logger.log(JSON.stringify({ event: 'outbox_publisher_started' }));
         void this.publishPending();
     }
     async onModuleDestroy(): Promise<void> {
@@ -98,6 +103,27 @@ export class OutboxPublisher implements OnModuleInit, OnModuleDestroy {
         catch {
         }
     }
+    private eventLogContext(event: PendingOutboxEvent): Record<string, string> {
+        const payload = event.payload;
+        const data = isRecord(payload.data) ? payload.data : undefined;
+        return {
+            eventId: event.id,
+            eventType: event.event_type,
+            aggregateId: event.aggregate_id,
+            ...(typeof payload.correlationId === 'string'
+                ? { correlationId: payload.correlationId }
+                : {}),
+            ...(typeof data?.transactionId === 'string'
+                ? { transactionId: data.transactionId }
+                : {}),
+            ...(typeof data?.walletId === 'string'
+                ? { walletId: data.walletId }
+                : {}),
+            ...(typeof data?.providerId === 'string'
+                ? { providerId: data.providerId }
+                : {}),
+        };
+    }
     async publishPending(): Promise<void> {
         if (this.running || this.stopped) {
             return;
@@ -135,7 +161,10 @@ export class OutboxPublisher implements OnModuleInit, OnModuleDestroy {
                 WHERE id = $1
                   AND published_at IS NULL
               `, [event.id]);
-                        this.logger.log(`Evento publicado: type=${event.event_type}, id=${event.id}`);
+                        this.logger.log(JSON.stringify({
+                            event: 'outbox_event_published',
+                            ...this.eventLogContext(event),
+                        }));
                     }
                     catch (error: unknown) {
                         const message = error instanceof Error
@@ -155,14 +184,21 @@ export class OutboxPublisher implements OnModuleInit, OnModuleDestroy {
                 WHERE id = $1
                   AND published_at IS NULL
               `, [event.id, MAX_RETRY_DELAY_MS, message]);
-                        this.logger.error(`Falha ao publicar evento ${event.id}; uma nova tentativa será agendada.`);
+                        this.logger.error(JSON.stringify({
+                            event: 'outbox_event_publish_retry_scheduled',
+                            ...this.eventLogContext(event),
+                            errorName: error instanceof Error ? error.name : 'UnknownError',
+                        }));
                     }
                 }
             });
         }
         catch (error: unknown) {
             const message = error instanceof Error ? error.message : 'Erro desconhecido';
-            this.logger.error(`Falha ao processar a Outbox: ${message}`);
+            this.logger.error(JSON.stringify({
+                event: 'outbox_batch_processing_failed',
+                error: message.slice(0, 500),
+            }));
         }
         finally {
             this.running = false;

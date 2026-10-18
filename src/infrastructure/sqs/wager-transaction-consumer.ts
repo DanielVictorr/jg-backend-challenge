@@ -8,12 +8,14 @@ import { parseWagerTransactionMessage } from './wager-transaction-message.js';
 const CONSUMER_NAME = 'wager-transaction-consumer';
 const MAX_MESSAGES = 10;
 const WAIT_TIME_SECONDS = 20;
-const VISIBILITY_TIMEOUT_SECONDS = 60;
+const DEFAULT_VISIBILITY_TIMEOUT_SECONDS = 60;
+const MAX_VISIBILITY_TIMEOUT_SECONDS = 43200;
 @Injectable()
 export class WagerTransactionConsumer implements OnModuleInit, OnModuleDestroy {
     private readonly logger = new Logger(WagerTransactionConsumer.name);
     private readonly client: SQSClient;
     private readonly queueUrl: string;
+    private readonly visibilityTimeoutSeconds: number;
     private readonly enabled: boolean;
     private stopping = false;
     private loopPromise: Promise<void> | undefined;
@@ -26,6 +28,16 @@ export class WagerTransactionConsumer implements OnModuleInit, OnModuleDestroy {
         this.queueUrl = this.enabled
             ? this.config.getOrThrow<string>('SQS_QUEUE_URL')
             : this.config.get<string>('SQS_QUEUE_URL', '');
+        const configuredVisibilityTimeout = Number(this.config.get<string>(
+            'SQS_VISIBILITY_TIMEOUT_SECONDS',
+            String(DEFAULT_VISIBILITY_TIMEOUT_SECONDS),
+        ));
+        if (!Number.isInteger(configuredVisibilityTimeout) ||
+            configuredVisibilityTimeout < 0 ||
+            configuredVisibilityTimeout > MAX_VISIBILITY_TIMEOUT_SECONDS) {
+            throw new RangeError('SQS_VISIBILITY_TIMEOUT_SECONDS deve ser um inteiro entre 0 e 43200.');
+        }
+        this.visibilityTimeoutSeconds = configuredVisibilityTimeout;
         this.client = new SQSClient({
             region: this.config.get<string>('AWS_REGION', 'us-east-1'),
             endpoint: this.config.get<string>('SQS_ENDPOINT'),
@@ -37,10 +49,13 @@ export class WagerTransactionConsumer implements OnModuleInit, OnModuleDestroy {
     }
     onModuleInit(): void {
         if (!this.enabled) {
-            this.logger.log('Consumidor SQS desabilitado; defina SQS_CONSUMER_ENABLED=true para ativá-lo.');
+            this.logger.log(JSON.stringify({
+                event: 'sqs_consumer_disabled',
+                message: 'Defina SQS_CONSUMER_ENABLED=true para ativar o consumidor.',
+            }));
             return;
         }
-        this.logger.log('Consumidor SQS iniciado.');
+        this.logger.log(JSON.stringify({ event: 'sqs_consumer_started' }));
         this.loopPromise = this.consumeLoop();
     }
     async onModuleDestroy(): Promise<void> {
@@ -51,7 +66,7 @@ export class WagerTransactionConsumer implements OnModuleInit, OnModuleDestroy {
         }
         finally {
             this.client.destroy();
-            this.logger.log('Consumidor SQS encerrado.');
+            this.logger.log(JSON.stringify({ event: 'sqs_consumer_stopped' }));
         }
     }
     private async consumeLoop(): Promise<void> {
@@ -61,7 +76,7 @@ export class WagerTransactionConsumer implements OnModuleInit, OnModuleDestroy {
                     QueueUrl: this.queueUrl,
                     MaxNumberOfMessages: MAX_MESSAGES,
                     WaitTimeSeconds: WAIT_TIME_SECONDS,
-                    VisibilityTimeout: VISIBILITY_TIMEOUT_SECONDS,
+                    VisibilityTimeout: this.visibilityTimeoutSeconds,
                 }), { abortSignal: this.receiveAbortController.signal });
                 const messages = response.Messages ?? [];
                 for (let index = 0; index < messages.length; index++) {
@@ -73,7 +88,9 @@ export class WagerTransactionConsumer implements OnModuleInit, OnModuleDestroy {
                         break;
                     }
                     if (!message.ReceiptHandle || !message.Body) {
-                        this.logger.error('Mensagem SQS sem Body ou ReceiptHandle; será deixada para nova tentativa.');
+                        this.logger.error(JSON.stringify({
+                            event: 'sqs_message_missing_body_or_receipt_handle',
+                        }));
                         continue;
                     }
                     await this.processMessage(message.Body, message.ReceiptHandle);
@@ -83,7 +100,10 @@ export class WagerTransactionConsumer implements OnModuleInit, OnModuleDestroy {
                 if (this.stopping) {
                     break;
                 }
-                this.logger.error('Falha ao consultar ou processar mensagens SQS.', error instanceof Error ? error.stack : String(error));
+                this.logger.error(JSON.stringify({
+                    event: 'sqs_receive_or_process_failed',
+                    errorName: error instanceof Error ? error.name : 'UnknownError',
+                }));
                 await this.delay(1000);
             }
         }
@@ -105,12 +125,23 @@ export class WagerTransactionConsumer implements OnModuleInit, OnModuleDestroy {
         catch (error) {
             if (error instanceof HttpException && error.getStatus() < 500) {
                 this.recordCounter('wager_messages_left_for_dlq_redrive_total', 'Mensagens inválidas deixadas na fila para possível redrive à DLQ.');
-                this.logger.warn('Mensagem SQS inválida; será deixada para redrive à DLQ.');
+                this.logger.warn(JSON.stringify({
+                    event: 'sqs_invalid_message_pending_dlq_redrive',
+                }));
                 return;
             }
-            this.logger.error('Falha inesperada ao interpretar mensagem SQS; será tentada novamente.');
+            this.logger.error(JSON.stringify({
+                event: 'sqs_message_parse_failed',
+                errorName: error instanceof Error ? error.name : 'UnknownError',
+            }));
             return;
         }
+        const messageContext = {
+            correlationId: parsed.messageId,
+            messageId: parsed.messageId,
+            walletId: parsed.input.walletId,
+            providerId: parsed.input.providerId,
+        };
         try {
             const result = await this.processor.execute(parsed.input, {
                 consumerName: CONSUMER_NAME,
@@ -119,20 +150,36 @@ export class WagerTransactionConsumer implements OnModuleInit, OnModuleDestroy {
             });
             await this.deleteMessage(receiptHandle);
             if ('duplicateMessage' in result) {
-                this.logger.log(`Mensagem duplicada já processada pelo Inbox: ${parsed.messageId}`);
+                this.logger.log(JSON.stringify({
+                    event: 'sqs_duplicate_message_acknowledged',
+                    ...messageContext,
+                }));
             }
             else {
-                this.logger.log(`Mensagem SQS processada: transactionId=${result.transactionId}, status=${result.status}`);
+                this.logger.log(JSON.stringify({
+                    event: 'sqs_message_processed',
+                    ...messageContext,
+                    transactionId: result.transactionId,
+                    status: result.status,
+                }));
             }
         }
         catch (error) {
             if (error instanceof HttpException && error.getStatus() < 500) {
-                this.logger.warn('Mensagem SQS rejeitada por erro terminal.');
+                this.logger.warn(JSON.stringify({
+                    event: 'sqs_message_rejected_terminally',
+                    ...messageContext,
+                    statusCode: error.getStatus(),
+                }));
                 await this.deleteMessage(receiptHandle);
                 return;
             }
             this.recordCounter('wager_sqs_processing_retries_total', 'Falhas transitórias no processamento SQS que permitem nova tentativa.');
-            this.logger.error('Falha transitória ao processar mensagem SQS; será tentada novamente.');
+            this.logger.error(JSON.stringify({
+                event: 'sqs_message_processing_retry',
+                ...messageContext,
+                errorName: error instanceof Error ? error.name : 'UnknownError',
+            }));
         }
     }
     private async deleteMessage(receiptHandle: string): Promise<void> {
@@ -151,10 +198,15 @@ export class WagerTransactionConsumer implements OnModuleInit, OnModuleDestroy {
                 ReceiptHandle: receiptHandle,
                 VisibilityTimeout: 0,
             }));
-            this.logger.log('Mensagem pendente devolvida à fila durante o encerramento.');
+            this.logger.log(JSON.stringify({
+                event: 'sqs_message_returned_during_shutdown',
+            }));
         }
         catch (error) {
-            this.logger.error('Não foi possível devolver a mensagem à fila; ela poderá ser redeliverada quando a visibilidade expirar.', error instanceof Error ? error.stack : String(error));
+            this.logger.error(JSON.stringify({
+                event: 'sqs_message_return_failed_during_shutdown',
+                errorName: error instanceof Error ? error.name : 'UnknownError',
+            }));
         }
     }
     private async delay(milliseconds: number): Promise<void> {

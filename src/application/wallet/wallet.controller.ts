@@ -1,9 +1,11 @@
-import { BadRequestException, Body, Controller, Get, Param, ParseUUIDPipe, Post, Query, } from '@nestjs/common';
+import { BadRequestException, Body, Controller, Get, Param, ParseUUIDPipe, Post, Query, UseGuards, } from '@nestjs/common';
 import { CreateWallet } from './create-wallet.js';
 import type { CreateWalletInput } from './create-wallet.js';
 import { GetWallet } from './get-wallet.js';
 import { GetWalletLedger } from './get-wallet-ledger.js';
 import { ReconcileWallet } from './reconcile-wallet.js';
+import { ProviderAuthenticationGuard } from '../../auth/provider-authentication.guard.js';
+@UseGuards(ProviderAuthenticationGuard)
 @Controller('wallets')
 export class WalletsController {
     constructor(private readonly createWallet: CreateWallet, private readonly getWallet: GetWallet, private readonly getWalletLedger: GetWalletLedger, private readonly reconcileWallet: ReconcileWallet) { }
