@@ -1,9 +1,7 @@
-﻿import dataSource from './dist/database/data-source.js';
-
+import dataSource from './dist/database/data-source.js';
 await dataSource.initialize();
-
 try {
-  const rows = await dataSource.query(`
+    const rows = await dataSource.query(`
     SELECT 'wallets' AS table_name, COUNT(*)::int AS total
       FROM wallets
     UNION ALL
@@ -20,8 +18,8 @@ try {
       FROM outbox_events
     ORDER BY table_name
   `);
-
-  console.table(rows);
-} finally {
-  await dataSource.destroy();
+    console.table(rows);
+}
+finally {
+    await dataSource.destroy();
 }

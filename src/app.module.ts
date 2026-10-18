@@ -21,75 +21,69 @@ import { WagerTransactionConsumer } from './infrastructure/sqs/wager-transaction
 import { ReconcileWallet } from './application/wallet/reconcile-wallet.js';
 import { HealthController } from './health/health.controller.js';
 import { HealthService } from './health/health.service.js';
-
 export const { ObserveModule, ObserveInstrument } = createObserveModule();
-
 @Module({
-  imports: [
-    ConfigModule.forRoot({
-      isGlobal: true,
-      envFilePath: '.env',
-    }),
-
-    TypeOrmModule.forRootAsync({
-      inject: [ConfigService],
-      useFactory: (config: ConfigService) => ({
-        type: 'postgres' as const,
-        host: config.getOrThrow<string>('DB_HOST'),
-        port: Number(config.getOrThrow<string>('DB_PORT')),
-        username: config.getOrThrow<string>('DB_USERNAME'),
-        password: config.getOrThrow<string>('DB_PASSWORD'),
-        database: config.getOrThrow<string>('DB_DATABASE'),
-        autoLoadEntities: true,
-        synchronize: false,
-        migrationsRun: false,
-      }),
-    }),
-
-    TypeOrmModule.forFeature([
-      WalletEntity,
-      LedgerEntryEntity,
-      WagerTransactionEntity,
-    ]),
-
-    ...(process.env.OBSERVE_APP_KEY?.trim() && 
-        process.env.OBSERVE_APP_SECRET?.trim()
-    ? [
-      ObserveModule.forRootAsync({
-        inject: [ConfigService],
-        useFactory: (config: ConfigService) => ({
-          appKey: config.getOrThrow<string>('OBSERVE_APP_KEY').trim(),
-          appSecret: config
-            .getOrThrow<string>('OBSERVE_APP_SECRET')
-            .trim(),
-          serviceId:
-            config.get<string>('OBSERVE_SERVICE_ID')?.trim() ||
-            'jg-backend-challenge',
+    imports: [
+        ConfigModule.forRoot({
+            isGlobal: true,
+            envFilePath: '.env',
         }),
-      }),
+        TypeOrmModule.forRootAsync({
+            inject: [ConfigService],
+            useFactory: (config: ConfigService) => ({
+                type: 'postgres' as const,
+                host: config.getOrThrow<string>('DB_HOST'),
+                port: Number(config.getOrThrow<string>('DB_PORT')),
+                username: config.getOrThrow<string>('DB_USERNAME'),
+                password: config.getOrThrow<string>('DB_PASSWORD'),
+                database: config.getOrThrow<string>('DB_DATABASE'),
+                autoLoadEntities: true,
+                synchronize: false,
+                migrationsRun: false,
+            }),
+        }),
+        TypeOrmModule.forFeature([
+            WalletEntity,
+            LedgerEntryEntity,
+            WagerTransactionEntity,
+        ]),
+        ...(process.env.OBSERVE_APP_KEY?.trim() &&
+            process.env.OBSERVE_APP_SECRET?.trim()
+            ? [
+                ObserveModule.forRootAsync({
+                    inject: [ConfigService],
+                    useFactory: (config: ConfigService) => ({
+                        appKey: config.getOrThrow<string>('OBSERVE_APP_KEY').trim(),
+                        appSecret: config
+                            .getOrThrow<string>('OBSERVE_APP_SECRET')
+                            .trim(),
+                        serviceId: config.get<string>('OBSERVE_SERVICE_ID')?.trim() ||
+                            'jg-backend-challenge',
+                    }),
+                }),
+            ]
+            : []),
+    ],
+    controllers: [
+        AppController,
+        WalletsController,
+        WageringController,
+        ProviderWageringTransactionsController,
+        HealthController,
+    ],
+    providers: [
+        AppService,
+        CreateWallet,
+        ProcessWagerTransaction,
+        GetWagerTransaction,
+        GetWallet,
+        GetWalletLedger,
+        RetryPendingReferences,
+        OutboxPublisher,
+        WagerTransactionConsumer,
+        ReconcileWallet,
+        HealthService,
     ]
-  : []),
-  ],
-  controllers: [
-    AppController,
-    WalletsController,
-    WageringController,
-    ProviderWageringTransactionsController,
-    HealthController,
-  ],
-  providers: [
-  AppService,
-  CreateWallet,
-  ProcessWagerTransaction,
-  GetWagerTransaction,
-  GetWallet,
-  GetWalletLedger,
-  RetryPendingReferences,
-  OutboxPublisher,
-  WagerTransactionConsumer,
-  ReconcileWallet,
-  HealthService,
-]
-  
 })
-export class AppModule {}
+export class AppModule {
+}

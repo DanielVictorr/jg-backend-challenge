@@ -1,9 +1,7 @@
-﻿import dataSource from './dist/database/data-source.js';
-
+import dataSource from './dist/database/data-source.js';
 await dataSource.initialize();
-
 try {
-  const columns = await dataSource.query(`
+    const columns = await dataSource.query(`
     SELECT
       table_name,
       column_name,
@@ -24,8 +22,7 @@ try {
       )
     ORDER BY table_name, ordinal_position
   `);
-
-  const constraints = await dataSource.query(`
+    const constraints = await dataSource.query(`
     SELECT
       cls.relname AS table_name,
       con.conname AS constraint_name,
@@ -44,8 +41,7 @@ try {
       )
     ORDER BY cls.relname, con.conname
   `);
-
-  const indexes = await dataSource.query(`
+    const indexes = await dataSource.query(`
     SELECT tablename, indexname, indexdef
     FROM pg_indexes
     WHERE schemaname = 'public'
@@ -58,15 +54,13 @@ try {
       )
     ORDER BY tablename, indexname
   `);
-
-  console.log('\\n=== COLUNAS ===');
-  console.table(columns);
-
-  console.log('\\n=== RESTRICOES ===');
-  console.table(constraints);
-
-  console.log('\\n=== INDICES ===');
-  console.table(indexes);
-} finally {
-  await dataSource.destroy();
+    console.log('\\n=== COLUNAS ===');
+    console.table(columns);
+    console.log('\\n=== RESTRICOES ===');
+    console.table(constraints);
+    console.log('\\n=== INDICES ===');
+    console.table(indexes);
+}
+finally {
+    await dataSource.destroy();
 }

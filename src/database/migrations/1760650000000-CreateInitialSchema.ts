@@ -1,13 +1,8 @@
-
 import { MigrationInterface, QueryRunner } from 'typeorm';
-
-export class CreateInitialSchema1760650000000
-  implements MigrationInterface
-{
-  name = 'CreateInitialSchema1760650000000';
-
-  public async up(queryRunner: QueryRunner): Promise<void> {
-    await queryRunner.query(`
+export class CreateInitialSchema1760650000000 implements MigrationInterface {
+    name = 'CreateInitialSchema1760650000000';
+    public async up(queryRunner: QueryRunner): Promise<void> {
+        await queryRunner.query(`
       CREATE TABLE wallets (
         id UUID PRIMARY KEY,
         player_id VARCHAR(100) NOT NULL,
@@ -27,8 +22,7 @@ export class CreateInitialSchema1760650000000
           UNIQUE (player_id, currency)
       )
     `);
-
-    await queryRunner.query(`
+        await queryRunner.query(`
       CREATE TABLE wagering_transactions (
         id UUID PRIMARY KEY,
         wallet_id UUID NOT NULL REFERENCES wallets(id),
@@ -63,8 +57,7 @@ export class CreateInitialSchema1760650000000
           ))
       )
     `);
-
-    await queryRunner.query(`
+        await queryRunner.query(`
       CREATE TABLE ledger_entries (
         id UUID PRIMARY KEY,
         wallet_id UUID NOT NULL REFERENCES wallets(id),
@@ -82,8 +75,7 @@ export class CreateInitialSchema1760650000000
           UNIQUE (transaction_id, wallet_id)
       )
     `);
-
-    await queryRunner.query(`
+        await queryRunner.query(`
       CREATE TABLE processed_messages (
         consumer_name VARCHAR(100) NOT NULL,
         message_id VARCHAR(255) NOT NULL,
@@ -92,8 +84,7 @@ export class CreateInitialSchema1760650000000
         PRIMARY KEY (consumer_name, message_id)
       )
     `);
-
-    await queryRunner.query(`
+        await queryRunner.query(`
       CREATE TABLE outbox_events (
         id UUID PRIMARY KEY,
         aggregate_type VARCHAR(100) NOT NULL,
@@ -110,29 +101,25 @@ export class CreateInitialSchema1760650000000
           CHECK (attempts >= 0)
       )
     `);
-
-    await queryRunner.query(`
+        await queryRunner.query(`
       CREATE INDEX idx_wagering_wallet_created
       ON wagering_transactions (wallet_id, created_at DESC)
     `);
-
-    await queryRunner.query(`
+        await queryRunner.query(`
       CREATE INDEX idx_wagering_reference
       ON wagering_transactions (reference_transaction_id)
     `);
-
-    await queryRunner.query(`
+        await queryRunner.query(`
       CREATE INDEX idx_outbox_pending
       ON outbox_events (next_attempt_at, created_at)
       WHERE published_at IS NULL
     `);
-  }
-
-  public async down(queryRunner: QueryRunner): Promise<void> {
-    await queryRunner.query('DROP TABLE IF EXISTS outbox_events');
-    await queryRunner.query('DROP TABLE IF EXISTS processed_messages');
-    await queryRunner.query('DROP TABLE IF EXISTS ledger_entries');
-    await queryRunner.query('DROP TABLE IF EXISTS wagering_transactions');
-    await queryRunner.query('DROP TABLE IF EXISTS wallets');
-  }
+    }
+    public async down(queryRunner: QueryRunner): Promise<void> {
+        await queryRunner.query('DROP TABLE IF EXISTS outbox_events');
+        await queryRunner.query('DROP TABLE IF EXISTS processed_messages');
+        await queryRunner.query('DROP TABLE IF EXISTS ledger_entries');
+        await queryRunner.query('DROP TABLE IF EXISTS wagering_transactions');
+        await queryRunner.query('DROP TABLE IF EXISTS wallets');
+    }
 }
