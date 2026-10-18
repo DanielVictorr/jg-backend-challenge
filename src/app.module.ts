@@ -18,6 +18,9 @@ import { ProviderWageringTransactionsController } from './application/wagering/p
 import { RetryPendingReferences } from './application/wagering/retry-pending-references.js';
 import { OutboxPublisher } from './infrastructure/outbox/outbox-publisher.js';
 import { WagerTransactionConsumer } from './infrastructure/sqs/wager-transaction-consumer.js';
+import { ReconcileWallet } from './application/wallet/reconcile-wallet.js';
+import { HealthController } from './health/health.controller.js';
+import { HealthService } from './health/health.service.js';
 
 export const { ObserveModule, ObserveInstrument } = createObserveModule();
 
@@ -49,17 +52,30 @@ export const { ObserveModule, ObserveInstrument } = createObserveModule();
       WagerTransactionEntity,
     ]),
 
-    ObserveModule.forRoot({
-      appKey: 'YOUR_APP_KEY',
-      appSecret: 'YOUR_APP_SECRET',
-      serviceId: 'jg-backend-challenge',
-    }),
+    ...(process.env.OBSERVE_APP_KEY?.trim() && 
+        process.env.OBSERVE_APP_SECRET?.trim()
+    ? [
+      ObserveModule.forRootAsync({
+        inject: [ConfigService],
+        useFactory: (config: ConfigService) => ({
+          appKey: config.getOrThrow<string>('OBSERVE_APP_KEY').trim(),
+          appSecret: config
+            .getOrThrow<string>('OBSERVE_APP_SECRET')
+            .trim(),
+          serviceId:
+            config.get<string>('OBSERVE_SERVICE_ID')?.trim() ||
+            'jg-backend-challenge',
+        }),
+      }),
+    ]
+  : []),
   ],
   controllers: [
     AppController,
     WalletsController,
     WageringController,
     ProviderWageringTransactionsController,
+    HealthController,
   ],
   providers: [
   AppService,
@@ -71,7 +87,9 @@ export const { ObserveModule, ObserveInstrument } = createObserveModule();
   RetryPendingReferences,
   OutboxPublisher,
   WagerTransactionConsumer,
-],
+  ReconcileWallet,
+  HealthService,
+]
   
 })
 export class AppModule {}

@@ -8,3 +8,5 @@ coverage/
 .DS_Store
 # TypeScript build cache
 *.tsbuildinfo
+# Backups temporários de testes
+test/integration/*.backup.ts

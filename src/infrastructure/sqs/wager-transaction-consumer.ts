@@ -1,10 +1,11 @@
-
 import {
   Injectable,
   Logger,
   OnModuleDestroy,
   OnModuleInit,
+  Optional,
 } from '@nestjs/common';
+import { TracerService } from '@nestjs/observe';
 import { ConfigService } from '@nestjs/config';
 import {
   ChangeMessageVisibilityCommand,
@@ -39,6 +40,7 @@ export class WagerTransactionConsumer
   constructor(
     private readonly config: ConfigService,
     private readonly processor: ProcessWagerTransaction,
+    @Optional() private readonly tracerService?: TracerService,
   ) {
     this.enabled =
       this.config.get<string>('SQS_CONSUMER_ENABLED', 'false') === 'true';
@@ -142,6 +144,16 @@ export class WagerTransactionConsumer
     }
   }
 
+  private recordCounter(name: string, description: string): void {
+    try {
+      this.tracerService
+        ?.counter(name, { description })
+        .increment();
+    } catch {
+      
+    }
+  }  
+
   
   private async processMessage(
     body: string,
@@ -149,21 +161,23 @@ export class WagerTransactionConsumer
   ): Promise<void> {
     let parsed: ReturnType<typeof parseWagerTransactionMessage>;
 
-    // Mensagens malformadas não devem ser apagadas.
-    // O redrive configurado no SQS poderá encaminhá-las à DLQ.
     try {
       parsed = parseWagerTransactionMessage(body);
     } catch (error) {
       if (error instanceof HttpException && error.getStatus() < 500) {
+        this.recordCounter(
+          'wager_messages_left_for_dlq_redrive_total',
+          'Mensagens inválidas deixadas na fila para possível redrive à DLQ.',
+        );
+
         this.logger.warn(
-          `Mensagem SQS inválida; será deixada para redrive à DLQ: ${error.message}`,
+          'Mensagem SQS inválida; será deixada para redrive à DLQ.',
         );
         return;
       }
 
       this.logger.error(
         'Falha inesperada ao interpretar mensagem SQS; será tentada novamente.',
-        error instanceof Error ? error.stack : String(error),
       );
       return;
     }
@@ -175,8 +189,6 @@ export class WagerTransactionConsumer
         payloadHash: parsed.payloadHash,
       });
 
-      // Só apaga após o processamento e o commit no banco.
-      // Se a exclusão falhar, a redelivery será protegida pelo Inbox.
       await this.deleteMessage(receiptHandle);
 
       if ('duplicateMessage' in result) {
@@ -190,23 +202,25 @@ export class WagerTransactionConsumer
       }
     } catch (error) {
       if (error instanceof HttpException && error.getStatus() < 500) {
-        // Erros terminais de negócio são reconhecidos e não repetidos.
         this.logger.warn(
-          `Mensagem SQS rejeitada por erro terminal: ${error.message}`,
+          'Mensagem SQS rejeitada por erro terminal.',
         );
 
         await this.deleteMessage(receiptHandle);
         return;
       }
 
-      // Erros transitórios, inclusive falha ao excluir após o commit,
-      // deixam a mensagem disponível para redelivery.
+      this.recordCounter(
+        'wager_sqs_processing_retries_total',
+        'Falhas transitórias no processamento SQS que permitem nova tentativa.',
+      );
+
       this.logger.error(
         'Falha transitória ao processar mensagem SQS; será tentada novamente.',
-        error instanceof Error ? error.stack : String(error),
       );
     }
   }
+
 
 
   private async deleteMessage(receiptHandle: string): Promise<void> {

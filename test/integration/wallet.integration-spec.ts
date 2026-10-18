@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { Test } from '@nestjs/testing';
 import type { INestApplication } from '@nestjs/common';
 import request from 'supertest';
+import { DataSource } from 'typeorm';
 
 import { AppModule } from '../../src/app.module.js';
 import { CreateWallet } from '../../src/application/wallet/create-wallet.js';
@@ -11,6 +12,7 @@ describe('Wallet â€” integraÃ§Ã£o HTTP', () => {
   let app: INestApplication;
   let createWallet: CreateWallet;
   let processWager: ProcessWagerTransaction;
+  let dataSource: DataSource;
 
   beforeAll(async () => {
     if (
@@ -31,6 +33,7 @@ describe('Wallet â€” integraÃ§Ã£o HTTP', () => {
 
     createWallet = app.get(CreateWallet);
     processWager = app.get(ProcessWagerTransaction);
+    dataSource = app.get(DataSource);
   });
 
   afterAll(async () => {
@@ -211,4 +214,91 @@ describe('Wallet â€” integraÃ§Ã£o HTTP', () => {
       expect(item.walletId).toBe(wallet.id);
     }
   });
+  
+  it('deve reconciliar uma carteira consistente', async () => {
+    const wallet = await createWallet.execute({
+      playerId: `reconciliation-ok-${randomUUID()}`,
+      initialBalance: {
+        amount: '125.75',
+        currency: 'BRL',
+      },
+    });
+
+    const response = await request(app.getHttpServer())
+      .post(`/wallets/${wallet.id}/reconciliation`)
+      .expect(201);
+
+    expect(response.body).toEqual({
+      walletId: wallet.id,
+      storedBalance: {
+        amount: '125.75',
+        currency: 'BRL',
+      },
+      calculatedBalance: {
+        amount: '125.75',
+        currency: 'BRL',
+      },
+      difference: {
+        amount: '0.00',
+        currency: 'BRL',
+      },
+      consistent: true,
+      checkedEntries: 1,
+    });
+  });
+
+  it('deve detectar divergência sem corrigir o saldo armazenado', async () => {
+    const wallet = await createWallet.execute({
+      playerId: `reconciliation-diff-${randomUUID()}`,
+      initialBalance: {
+        amount: '100.00',
+        currency: 'BRL',
+      },
+    });
+
+    await dataSource.query(
+      'UPDATE wallets SET balance = $1 WHERE id = $2',
+      ['110.00', wallet.id],
+    );
+
+    const response = await request(app.getHttpServer())
+      .post(`/wallets/${wallet.id}/reconciliation`)
+      .expect(201);
+
+    expect(response.body).toEqual({
+      walletId: wallet.id,
+      storedBalance: {
+        amount: '110.00',
+        currency: 'BRL',
+      },
+      calculatedBalance: {
+        amount: '100.00',
+        currency: 'BRL',
+      },
+      difference: {
+        amount: '10.00',
+        currency: 'BRL',
+      },
+      consistent: false,
+      checkedEntries: 1,
+    });
+
+    const storedWallet = await dataSource.query<
+      { balance: string }[]
+    >(
+      'SELECT balance::text AS balance FROM wallets WHERE id = $1',
+      [wallet.id],
+    );
+
+    expect(storedWallet[0].balance).toBe('110.00');
+  });
+
+  it('deve retornar 404 ao reconciliar carteira inexistente', async () => {
+    const response = await request(app.getHttpServer())
+      .post(`/wallets/${randomUUID()}/reconciliation`)
+      .expect(404);
+
+    expect(response.body.code).toBe('WALLET_NOT_FOUND');
+  });
+
 });

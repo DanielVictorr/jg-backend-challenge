@@ -3,7 +3,8 @@ import {
   ConflictException,
   Injectable,
   NotFoundException,
-  InternalServerErrorException
+  InternalServerErrorException,
+  Optional,
 } from '@nestjs/common';
 import { DataSource, QueryFailedError } from 'typeorm';
 import { randomUUID } from 'node:crypto';
@@ -16,7 +17,7 @@ import {
   WagerTransactionKind,
   WagerTransactionStatus,
 } from '../../domain/wagering/wager-transaction.js';
-
+import { TracerService } from '@nestjs/observe';
 import { WalletEntity } from '../../database/entities/wallet.entity.js';
 import { LedgerEntryEntity } from '../../database/entities/ledger-entry.entity.js';
 import { WagerTransactionEntity } from '../../database/entities/wager-transaction.entity.js';
@@ -54,9 +55,97 @@ export interface InboxDuplicateResult {
   duplicateMessage: true;
 }
 
+
 @Injectable()
 export class ProcessWagerTransaction {
-  constructor(private readonly dataSource: DataSource) {}
+  constructor(
+    private readonly dataSource: DataSource,
+    @Optional() private readonly tracerService?: TracerService,
+  ) {}
+
+  
+private recordLockConflict(): void {
+  try {
+    this.tracerService
+      ?.counter('wager_lock_conflicts_total', {
+        description:
+          'Total de conflitos de bloqueio ou serialização no PostgreSQL.',
+      })
+      .increment();
+  } catch {
+    // Falhas de telemetria não podem afetar o processamento financeiro.
+  }
+}
+
+
+  private recordProcessingLatency(durationMs: number): void {
+    if (!this.tracerService || !Number.isFinite(durationMs)) {
+      return;
+    }
+
+    try {
+      this.tracerService
+        .summary('wager_transaction_processing_duration_ms', {
+          description:
+            'Duração do processamento de transações, em milissegundos.',
+        })
+        .observe(durationMs);
+    } catch {
+    
+    }
+  }
+
+  private recordMetrics(
+    outcome: ProcessWagerTransactionOutput | InboxDuplicateResult,
+  ): void {
+    if (!this.tracerService) {
+      return;
+    }
+
+    try {
+      if ('duplicateMessage' in outcome) {
+        this.tracerService
+          .counter('wager_duplicate_messages_total', {
+            description:
+              'Total de mensagens duplicadas identificadas pela Inbox.',
+          })
+          .increment();
+
+        return;
+      }
+
+      if (outcome.idempotentReplay) {
+        this.tracerService
+          .counter('wager_idempotent_replays_total', {
+            description: 'Total de respostas idempotentes reutilizadas.',
+          })
+          .increment();
+
+        return;
+      }
+
+      const validStatuses = Object.values(WagerTransactionStatus);
+
+      if (
+        !validStatuses.includes(
+          outcome.status as WagerTransactionStatus,
+        )
+      ) {
+        return;
+      }
+
+      this.tracerService
+        .counter<'status'>('wager_transactions_total', {
+          description: 'Total de novas transações persistidas por estado.',
+          labels: ['status'],
+        })
+        .increment({
+          status: outcome.status as WagerTransactionStatus,
+        });
+    } catch {
+      
+    }
+  }
 
     async execute(
     input: ProcessWagerTransactionInput,
@@ -71,6 +160,7 @@ export class ProcessWagerTransaction {
     input: ProcessWagerTransactionInput,
     inboxContext?: InboxMessageContext,
   ): Promise<ProcessWagerTransactionOutput | InboxDuplicateResult> {
+    const startedAt = Date.now();
     this.validateInput(input);
 
     if (inboxContext) {
@@ -119,7 +209,9 @@ export class ProcessWagerTransaction {
     const payloadHash = calculateWagerPayloadHash(input);
 
     try {
-      return await this.dataSource.transaction(async (manager) => {
+      const outcome = await this.dataSource.transaction<
+          ProcessWagerTransactionOutput | InboxDuplicateResult
+        >(async (manager) => {
 
 
         const markInboxProcessed = async (): Promise<void> => {
@@ -579,17 +671,28 @@ export class ProcessWagerTransaction {
           ],
         );
 
-        await markInboxProcessed();
+                await markInboxProcessed();
         return result;
       });
-    } catch (error) {
-      // Duas requisições simultâneas podem competir por um índice único.
-      // Não convertemos qualquer violação de unicidade em repetição.
+
+      this.recordMetrics(outcome);
+      this.recordProcessingLatency(Date.now() - startedAt);
+      return outcome;
+    } catch (error) { 
+      this.recordProcessingLatency(Date.now() - startedAt);
+      
       if (error instanceof QueryFailedError) {
         const driverError = error.driverError as {
           code?: string;
           constraint?: string;
         };
+        if (
+          driverError.code === '40P01' ||
+          driverError.code === '55P03' ||
+          driverError.code === '40001'
+        ) {
+          this.recordLockConflict();
+        }
 
         if (
           driverError.code === '23505' &&
@@ -627,10 +730,13 @@ export class ProcessWagerTransaction {
               };
 
               if (!inboxContext) {
+                this.recordMetrics(response);
                 return response;
               }
 
-              return await this.dataSource.transaction(async (manager) => {
+              const outcome = await this.dataSource.transaction<
+                ProcessWagerTransactionOutput | InboxDuplicateResult
+              >(async (manager) => {
                 const insertedRows: Array<{ message_id: string }> =
                   await manager.query(
                     `INSERT INTO processed_messages
@@ -698,8 +804,11 @@ export class ProcessWagerTransaction {
                   [inboxContext.consumerName, inboxContext.messageId],
                 );
 
-                return response;
+                                return response;
               });
+
+              this.recordMetrics(outcome);
+              return outcome;
             }
 
           }

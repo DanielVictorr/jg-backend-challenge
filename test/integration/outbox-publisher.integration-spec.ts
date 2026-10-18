@@ -49,8 +49,7 @@ describe('OutboxPublisher — integração PostgreSQL + LocalStack SQS', () => {
       host: process.env.DB_HOST ?? '127.0.0.1',
       port: 55432,
       username: process.env.DB_USERNAME ?? 'postgres',
-      password:
-        process.env.DB_PASSWORD || 'integration_only_password',
+      password: process.env.DB_PASSWORD,
       database: 'jg_backend_integration',
       synchronize: false,
       migrationsRun: false,

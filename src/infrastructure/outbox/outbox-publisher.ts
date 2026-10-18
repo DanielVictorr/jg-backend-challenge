@@ -3,7 +3,14 @@ import {
   SQSClient,
   SendMessageCommand,
 } from '@aws-sdk/client-sqs';
-import { Injectable, Logger, OnModuleDestroy, OnModuleInit } from '@nestjs/common';
+import {
+  Injectable,
+  Logger,
+  OnModuleDestroy,
+  OnModuleInit,
+  Optional,
+} from '@nestjs/common';
+import { TracerService } from '@nestjs/observe';
 import { ConfigService } from '@nestjs/config';
 import { DataSource } from 'typeorm';
 
@@ -33,6 +40,7 @@ export class OutboxPublisher implements OnModuleInit, OnModuleDestroy {
     constructor(
       private readonly dataSource: DataSource,
       private readonly configService: ConfigService,
+      @Optional() private readonly tracerService: TracerService,
     ) {
       const endpoint = this.configService.get<string>('SQS_ENDPOINT');
       const region =
@@ -63,13 +71,13 @@ export class OutboxPublisher implements OnModuleInit, OnModuleDestroy {
 
   onModuleInit(): void {
       if (
-        this.configService.get<string>('OUTBOX_PUBLISHER_ENABLED') !== 'true'
+        this.configService.get<string>('OUTBOX_PUBLISHER_ENABLED') === 'false'
       ) {
-      this.logger.log(
-        'Publicador da Outbox desabilitado; defina OUTBOX_PUBLISHER_ENABLED=true para ativá-lo.',
-      );
-      return;
-    }
+        this.logger.log(
+          'Publicador da Outbox desabilitado por configuração.',
+        );
+        return;
+      }
 
     this.timer = setInterval(() => {
       void this.publishPending();
@@ -93,6 +101,41 @@ export class OutboxPublisher implements OnModuleInit, OnModuleDestroy {
     this.sqs.destroy();
   }
 
+  private async recordOutboxLag(): Promise<void> {
+    if (!this.tracerService) {
+      return;
+    }
+
+    try {
+      const rows = (await this.dataSource.query(`
+        SELECT
+          COALESCE(
+            EXTRACT(
+              EPOCH FROM (NOW() - MIN(created_at))
+            ) * 1000,
+            0
+          ) AS lag_ms
+        FROM outbox_events
+        WHERE published_at IS NULL
+          AND next_attempt_at <= NOW()
+      `)) as Array<{ lag_ms: string | number }>;
+
+      const lagMs = Number(rows[0]?.lag_ms ?? 0);
+
+      if (!Number.isFinite(lagMs) || lagMs < 0) {
+        return;
+      }
+
+      this.tracerService
+        .summary('outbox_lag_ms', {
+          description:
+            'Idade do evento elegível mais antigo ainda pendente na Outbox, em milissegundos.',
+        })
+        .observe(lagMs);
+    } catch {
+      
+    }
+  }
   async publishPending(): Promise<void> {
     if (this.running || this.stopped) {
       return;
@@ -101,6 +144,7 @@ export class OutboxPublisher implements OnModuleInit, OnModuleDestroy {
     this.running = true;
 
     try {
+      await this.recordOutboxLag();
       await this.dataSource.transaction(async (manager) => {
         const events = (await manager.query(
           `

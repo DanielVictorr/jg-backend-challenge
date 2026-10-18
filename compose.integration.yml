@@ -5,7 +5,7 @@
     environment:
       POSTGRES_DB: jg_backend_integration
       POSTGRES_USER: postgres
-      POSTGRES_PASSWORD: integration_only_password
+      POSTGRES_PASSWORD: ${DB_PASSWORD:?DB_PASSWORD precisa estar definida no .env}
     ports:
       - "127.0.0.1:55432:5432"
     volumes:

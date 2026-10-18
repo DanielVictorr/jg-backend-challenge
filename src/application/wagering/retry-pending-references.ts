@@ -1,10 +1,11 @@
-
 import {
   Injectable,
   Logger,
   OnModuleDestroy,
   OnModuleInit,
+  Optional,
 } from '@nestjs/common';
+import { TracerService } from '@nestjs/observe';
 import { DataSource, EntityManager } from 'typeorm';
 import { randomUUID } from 'node:crypto';
 
@@ -40,28 +41,52 @@ export class RetryPendingReferences
 
   private interval: ReturnType<typeof setInterval> | undefined;
   private running = false;
+  private activeRun: Promise<void> | undefined;
 
-  constructor(private readonly dataSource: DataSource) {}
+  constructor( 
+    private readonly dataSource: DataSource,
+    @Optional() private readonly tracerService?: TracerService,
+  ) {}
+
+  private recordCounter(
+  name: string,
+  description: string,
+    ): void {
+      try {
+        this.tracerService
+          ?.counter(name, { description })
+          .increment();
+      } catch {
+        
+      }
+    }
 
   onModuleInit(): void {
-    this.interval = setInterval(() => {
-      void this.runSafely();
-    }, POLL_INTERVAL_MS);
+  this.interval = setInterval(() => {
+    this.startRun();
+  }, POLL_INTERVAL_MS);
 
-    void this.runSafely();
+  this.startRun();
+}
+
+async onModuleDestroy(): Promise<void> {
+  if (this.interval !== undefined) {
+    clearInterval(this.interval);
+    this.interval = undefined;
   }
 
-  onModuleDestroy(): void {
-    if (this.interval !== undefined) {
-      clearInterval(this.interval);
-      this.interval = undefined;
-    }
+  await this.activeRun;
+}
+
+private startRun(): void {
+  if (this.activeRun) {
+    return;
   }
 
-  /**
-   * Método público para executar o worker de forma determinística
-   * nos testes de integração.
-   */
+  this.activeRun = this.runSafely().finally(() => {
+    this.activeRun = undefined;
+  });
+}
   async processDueReferences(): Promise<void> {
     if (this.running) {
       return;
@@ -220,9 +245,13 @@ export class RetryPendingReferences
       FailureCode.ReferenceNotFound,
       retryCount,
     );
+      this.recordCounter(
+        'wager_reference_rejections_total',
+        'Total de referências rejeitadas por esgotamento de tentativas ou prazo.',
+      );
 
-    this.logger.warn(
-      `Transação ${transaction.id} rejeitada: referência não encontrada.`,
+      this.logger.warn(
+        `Transação ${transaction.id} rejeitada: referência não encontrada.`,
     );
 
     return;
@@ -245,10 +274,15 @@ export class RetryPendingReferences
         referenceExpiresAt: expiresAt,
       });
 
-    this.logger.debug(
-      `Transação ${transaction.id}: tentativa ${retryCount}/${MAX_RETRIES}; ` +
+      this.recordCounter(
+        'wager_reference_retries_total',
+        'Total de novas tentativas agendadas para referências pendentes.',
+      );
+
+      this.logger.debug(
+        `Transação ${transaction.id}: tentativa ${retryCount}/${MAX_RETRIES}; ` +
         `próxima tentativa em ${delaySeconds}s.`,
-    );
+      );
   }
 
   private async processResolvedReference(

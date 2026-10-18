@@ -86,12 +86,17 @@ function createConsumer(options?: {
     }),
   };
 
+  const increment = vi.fn();
+  const counter = vi.fn(() => ({ increment }));
+  const tracerService = { counter };
+
   const consumer = new WagerTransactionConsumer(
     config as never,
     processor as unknown as ProcessWagerTransaction,
+    tracerService as never,
   );
 
-  return { consumer, processor };
+  return { consumer, processor, counter, increment };
 }
 
 function invokeProcessMessage(
@@ -120,6 +125,40 @@ describe('WagerTransactionConsumer', () => {
     expect(sqsMocks.send).not.toHaveBeenCalled();
   });
 
+  it('registra mensagem inválida deixada para redrive à DLQ', async () => {
+    const { consumer, processor, counter, increment } = createConsumer();
+
+    await invokeProcessMessage(consumer, '{json-invalido');
+
+    expect(processor.execute).not.toHaveBeenCalled();
+    expect(counter).toHaveBeenCalledWith(
+      'wager_messages_left_for_dlq_redrive_total',
+      expect.objectContaining({
+        description: expect.any(String),
+      }),
+    );
+    expect(increment).toHaveBeenCalledOnce();
+  });
+
+  it('registra falha transitória do processamento para nova tentativa', async () => {
+    const execute = vi.fn().mockRejectedValue(
+      new Error('Falha temporária no banco'),
+    );
+
+    const { consumer, counter, increment } = createConsumer({ execute });
+
+      await invokeProcessMessage(consumer, validBody);
+
+      expect(counter).toHaveBeenCalledWith(
+        'wager_sqs_processing_retries_total',
+        expect.objectContaining({
+          description: expect.any(String),
+        }),
+      );
+      expect(increment).toHaveBeenCalledOnce();
+      expect(sqsMocks.send).not.toHaveBeenCalled();
+  });
+
   it('processa a mensagem antes de solicitar sua exclusão', async () => {
     const order: string[] = [];
 
@@ -129,8 +168,8 @@ describe('WagerTransactionConsumer', () => {
         transactionId: 'transaction-test-001',
         status: 'Processed',
       };
-    });
-
+  });
+  
     sqsMocks.send.mockImplementation(async (command: unknown) => {
       if (command instanceof Object &&
           command.constructor.name === 'DeleteMessageCommand') {
